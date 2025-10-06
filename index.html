@@ -476,6 +476,31 @@
             border-left: 3px solid #FF9800;
         }
         
+        .net-flow {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 10px;
+            text-align: center;
+        }
+        
+        .net-flow-value {
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+        
+        .filling {
+            color: #4CAF50;
+        }
+        
+        .emptying {
+            color: #FF9800;
+        }
+        
+        .balanced {
+            color: #2196F3;
+        }
+        
         footer {
             margin-top: 30px;
             text-align: center;
@@ -514,9 +539,9 @@
 <body>
     <div class="container">
         <header>
-            <h1>Water Tank System - Algorithm Comparison</h1>
+            <h1>Water Tank System Simulation</h1>
             <div class="company">by BrainIOT.AI</div>
-            <p class="subtitle">Comparing raw ultrasonic sensor data vs. Kalman-filtered processed data</p>
+            <!-- <p class="subtitle">Comparing raw ultrasonic sensor data vs. Kalman-filtered processed data</p> -->
         </header>
         
         <div class="comparison-container">
@@ -600,13 +625,13 @@
                 </div>
                 
                 <div class="algorithm-info">
-                    <div class="algorithm-title">Kalman Filter Algorithm Features:</div>
+                    <div class="algorithm-title">Enhanced Kalman Filter Algorithm Features:</div>
                     <div class="algorithm-desc">
-                        • Adaptive noise filtering based on recent variance<br>
-                        • Outlier rejection using median and jump detection<br>
-                        • Dynamic measurement noise adjustment<br>
-                        • Stale sensor detection and handling<br>
-                        • Smooth transitions during fill/empty mode changes
+                        • Adaptive noise filtering with buffer-based outlier rejection<br>
+                        • Median filtering with minimum valid sample requirement<br>
+                        • Dynamic measurement noise adjustment based on variance<br>
+                        • Jump detection with absolute and relative thresholds<br>
+                        • Stale sensor detection and handling
                     </div>
                     <div class="algorithm-desc">
                         The processed tank shows significantly reduced jitter and outliers while maintaining accurate water level tracking.
@@ -639,7 +664,11 @@
                                     <span>Rate:</span>
                                     <span class="slider-value" id="fillRateValue">2.0 %/s</span>
                                 </div>
-                                <input type="range" min="0.1" max="5" step="0.1" value="2" class="slider fill-slider" id="fillRateSlider">
+                                <input type="range" min="0.00" max="5" step="0.01" value="0" class="slider fill-slider" id="fillRateSlider">
+                            </div>
+                            <div class="status">
+                                <div class="status-indicator status-on" id="fillStatusIndicator"></div>
+                                <span id="fillStatusText">Always Enabled</span>
                             </div>
                         </div>
                         
@@ -650,9 +679,21 @@
                                     <span>Rate:</span>
                                     <span class="slider-value" id="emptyRateValue">1.5 %/s</span>
                                 </div>
-                                <input type="range" min="0.1" max="5" step="0.1" value="1.5" class="slider empty-slider" id="emptyRateSlider">
+                                <input type="range" min="0.00" max="5" step="0.01" value="1.0" class="slider empty-slider" id="emptyRateSlider">
+                            </div>
+                            <div class="status">
+                                <div class="status-indicator status-on" id="emptyStatusIndicator"></div>
+                                <span id="emptyStatusText">Always Enabled</span>
                             </div>
                         </div>
+                    </div>
+                    
+                    <div class="net-flow">
+                        <div class="slider-label">
+                            <span>Net Flow Rate:</span>
+                            <span class="net-flow-value filling" id="netFlowValue">+0.5 %/s</span>
+                        </div>
+                        <div id="netFlowStatus">Tank is filling</div>
                     </div>
                     
                     <div class="status">
@@ -757,6 +798,196 @@
     </div>
 
     <script>
+        // Enhanced Kalman Filter Implementation (from your C++ code)
+        class EnhancedKalmanFilter {
+            constructor(processNoise = 0.01, measurementNoise = 0.1, initialEstimate = 25) {
+                this.Q = processNoise;
+                this.R = measurementNoise;
+                this.x = initialEstimate;
+                this.P = 1.0;
+                this.K = 0.0;
+                
+                // Buffer configuration
+                this.BUF_SIZE = 10;
+                this.readings = new Array(this.BUF_SIZE).fill(0);
+                this.readingsValid = new Array(this.BUF_SIZE).fill(false);
+                this.bufIndex = 0;
+                
+                // Filtering parameters
+                this.alpha = 0.5;
+                this.displayAlpha = 0.08;
+                this.ABS_JUMP_THRESHOLD = 50.0;
+                this.RELATIVE_JUMP_FACTOR = 3.5;
+                this.STALE_THRESHOLD = 8;
+                this.MIN_VALID_FOR_MEDIAN = 6;
+                
+                this.ema = initialEstimate;
+                this.displaySmoothed = initialEstimate;
+                this.firstFilled = true;
+                this.displayInit = true;
+            }
+
+            // Compute median of valid values
+            computeMedianValid() {
+                const tmp = [];
+                for (let i = 0; i < this.BUF_SIZE; ++i) {
+                    if (this.readingsValid[i]) tmp.push(this.readings[i]);
+                }
+                if (tmp.length < this.MIN_VALID_FOR_MEDIAN) return NaN;
+                
+                tmp.sort((a, b) => a - b);
+                const mid = Math.floor(tmp.length / 2);
+                if (tmp.length % 2 === 0) return (tmp[mid - 1] + tmp[mid]) / 2.0;
+                else return tmp[mid];
+            }
+
+            // Compute variance of valid samples
+            computeVarianceValid() {
+                const tmp = [];
+                for (let i = 0; i < this.BUF_SIZE; ++i) {
+                    if (this.readingsValid[i]) tmp.push(this.readings[i]);
+                }
+                if (tmp.length === 0) return 1.0;
+                
+                const mean = tmp.reduce((sum, val) => sum + val, 0) / tmp.length;
+                const variance = tmp.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / tmp.length;
+                
+                return Math.max(variance, 0.01);
+            }
+
+            // Predict-only step
+            predict() {
+                this.P = this.P + this.Q;
+                return this.x;
+            }
+
+            // Full update using measurement
+            update(measurement) {
+                // Predict (time update)
+                this.P = this.P + this.Q;
+                // Measurement update
+                this.K = this.P / (this.P + this.R);
+                this.x = this.x + this.K * (measurement - this.x);
+                this.P = (1 - this.K) * this.P;
+                return this.x;
+            }
+
+            // Enhanced processing with buffer and outlier rejection
+            processWaterLevel(rawReading, tankHeight) {
+                let measurementAccepted = false;
+                let sensorError = false;
+
+                // Validate rawReading
+                if (!isFinite(rawReading)) {
+                    this.readings[this.bufIndex % this.BUF_SIZE] = 0.0;
+                    this.readingsValid[this.bufIndex % this.BUF_SIZE] = false;
+                    this.bufIndex++;
+                } else {
+                    // Find last valid reading
+                    let lastValid = NaN;
+                    for (let i = 1; i <= this.BUF_SIZE; ++i) {
+                        const idx = (this.bufIndex - i + this.BUF_SIZE) % this.BUF_SIZE;
+                        if (this.readingsValid[idx]) {
+                            lastValid = this.readings[idx];
+                            break;
+                        }
+                    }
+
+                    let reject = false;
+                    if (!isNaN(lastValid)) {
+                        const absDiff = Math.abs(rawReading - lastValid);
+                        const recentVar = this.computeVarianceValid();
+                        const recentStd = Math.sqrt(recentVar);
+                        
+                        if (absDiff > this.ABS_JUMP_THRESHOLD) reject = true;
+                        else if (absDiff > this.RELATIVE_JUMP_FACTOR * recentStd && recentStd > 0.5) reject = true;
+                    }
+                    
+                    this.readings[this.bufIndex % this.BUF_SIZE] = rawReading;
+                    this.readingsValid[this.bufIndex % this.BUF_SIZE] = !reject;
+                    this.bufIndex++;
+                    measurementAccepted = !reject;
+                }
+
+                // Process buffer data
+                const medianDist = this.computeMedianValid();
+
+                if (this.firstFilled && !isNaN(medianDist)) {
+                    this.ema = medianDist;
+                    this.firstFilled = false;
+                }
+
+                let kalmanOut;
+                if (!isNaN(medianDist)) {
+                    // EMA over the median
+                    this.ema = this.alpha * medianDist + (1 - this.alpha) * this.ema;
+
+                    // Adaptive measurement noise
+                    const recentVar = this.computeVarianceValid();
+                    const adaptiveR = 0.2 + 0.5 * recentVar;
+                    this.R = adaptiveR;
+
+                    // Update Kalman
+                    kalmanOut = this.update(this.ema);
+
+                    // Display EMA
+                    if (this.displayInit) {
+                        this.displaySmoothed = kalmanOut;
+                        this.displayInit = false;
+                    } else {
+                        this.displaySmoothed = this.displayAlpha * kalmanOut + (1 - this.displayAlpha) * this.displaySmoothed;
+                    }
+                } else {
+                    // Predict-only step
+                    kalmanOut = this.predict();
+                    
+                    if (this.displayInit) {
+                        this.displaySmoothed = kalmanOut;
+                        this.displayInit = false;
+                    } else {
+                        this.displaySmoothed = this.displayAlpha * kalmanOut + (1 - this.displayAlpha) * this.displaySmoothed;
+                    }
+                }
+
+                // Stale detection
+                let last = NaN;
+                let sameCount = 0;
+                const checkCount = Math.min(this.BUF_SIZE, this.bufIndex);
+                for (let i = 0; i < checkCount; ++i) {
+                    const idx = (this.bufIndex - 1 - i + this.BUF_SIZE) % this.BUF_SIZE;
+                    if (!this.readingsValid[idx]) continue;
+                    if (isNaN(last)) {
+                        last = this.readings[idx];
+                        sameCount = 1;
+                    } else {
+                        if (Math.abs(this.readings[idx] - last) < 0.05) sameCount++;
+                        else break;
+                    }
+                }
+                if (sameCount >= this.STALE_THRESHOLD) sensorError = true;
+
+                // Convert to percentage
+                let percent = 100.0 * (tankHeight - this.displaySmoothed) / tankHeight;
+                percent = Math.max(0, Math.min(100, percent));
+
+                return {
+                    level: percent,
+                    filteredDistance: this.displaySmoothed,
+                    measurementAccepted,
+                    sensorError
+                };
+            }
+
+            setMeasurementNoise(newR) {
+                if (newR > 0.0) this.R = newR;
+            }
+
+            reinit(newEstimate, newP = 1.0) {
+                this.x = newEstimate;
+                this.P = newP;
+            }
+        }
+
         // System state with configurable parameters
         const state = {
             powerOn: false,
@@ -765,49 +996,18 @@
             sensorHeight: 22, // cm - distance from sensor to water when full
             minWaterLevel: 10, // percentage - auto refill threshold
             tankCapacity: 1000, // liters
-            fillRate: 2.0, // percentage per second
-            emptyRate: 1.5, // percentage per second
+            fillRate: 0.0, // percentage per second
+            emptyRate: 1.0, // percentage per second
             noiseLevel: 2, // 1=Low, 2=Medium, 3=High
             outlierFrequency: 5, // percentage
             lastUpdate: new Date(),
             rawDistance: 25, // cm
             filteredDistance: 25, // cm
-            algorithmBuffer: [],
-            bufferIndex: 0,
-            autoMode: true,
-            simultaneousMode: true // New: Allow simultaneous fill/empty control
+            autoMode: true
         };
 
-        // Kalman Filter simulation (simplified)
-        class SimpleKalmanFilter {
-            constructor(processNoise, measurementNoise, initialEstimate) {
-                this.Q = processNoise;
-                this.R = measurementNoise;
-                this.x = initialEstimate;
-                this.P = 1.0;
-                this.K = 0;
-            }
-
-            update(measurement) {
-                // Prediction
-                this.P = this.P + this.Q;
-                
-                // Update
-                this.K = this.P / (this.P + this.R);
-                this.x = this.x + this.K * (measurement - this.x);
-                this.P = (1 - this.K) * this.P;
-                
-                return this.x;
-            }
-
-            predict() {
-                this.P = this.P + this.Q;
-                return this.x;
-            }
-        }
-
-        // Initialize Kalman filter
-        const kalmanFilter = new SimpleKalmanFilter(0.01, 0.5, 25);
+        // Initialize Enhanced Kalman Filter
+        const enhancedKalman = new EnhancedKalmanFilter(0.01, 0.5, 25);
 
         // DOM elements
         const rawWater = document.getElementById('rawWater');
@@ -827,6 +1027,10 @@
         const emptyRateValue = document.getElementById('emptyRateValue');
         const flowStatusIndicator = document.getElementById('flowStatusIndicator');
         const flowStatusText = document.getElementById('flowStatusText');
+        const fillStatusIndicator = document.getElementById('fillStatusIndicator');
+        const fillStatusText = document.getElementById('fillStatusText');
+        const emptyStatusIndicator = document.getElementById('emptyStatusIndicator');
+        const emptyStatusText = document.getElementById('emptyStatusText');
         const noiseLevelSlider = document.getElementById('noiseLevelSlider');
         const noiseLevelValue = document.getElementById('noiseLevelValue');
         const outlierSlider = document.getElementById('outlierSlider');
@@ -853,15 +1057,19 @@
         const sensorHeightInput = document.getElementById('sensorHeight');
         const minWaterLevelInput = document.getElementById('minWaterLevel');
         const tankCapacityInput = document.getElementById('tankCapacity');
+        const netFlowValue = document.getElementById('netFlowValue');
+        const netFlowStatus = document.getElementById('netFlowStatus');
 
         // Initialize the display
         updateWaterDisplays();
         updateSensorData();
         updateConfigDisplay();
+        updateFlowStatus();
+        updateNetFlowDisplay();
         
         // Set initial slider values
-        fillRateValue.textContent = `${state.fillRate} %/s`;
-        emptyRateValue.textContent = `${state.emptyRate} %/s`;
+        fillRateValue.textContent = `${state.fillRate.toFixed(2)} %/s`;
+        emptyRateValue.textContent = `${state.emptyRate.toFixed(2)} %/s`;
         updateNoiseDisplay();
         updateOutlierDisplay();
 
@@ -871,12 +1079,14 @@
         // Slider events
         fillRateSlider.addEventListener('input', function() {
             state.fillRate = parseFloat(this.value);
-            fillRateValue.textContent = `${state.fillRate.toFixed(1)} %/s`;
+            fillRateValue.textContent = `${state.fillRate.toFixed(2)} %/s`;
+            updateNetFlowDisplay();
         });
 
         emptyRateSlider.addEventListener('input', function() {
             state.emptyRate = parseFloat(this.value);
-            emptyRateValue.textContent = `${state.emptyRate.toFixed(1)} %/s`;
+            emptyRateValue.textContent = `${state.emptyRate.toFixed(2)} %/s`;
+            updateNetFlowDisplay();
         });
 
         noiseLevelSlider.addEventListener('input', function() {
@@ -928,6 +1138,38 @@
             minLevelValue.textContent = `${state.minWaterLevel}%`;
         }
 
+        // Update flow status indicators
+        function updateFlowStatus() {
+            // Both fill and empty are always enabled in simultaneous mode
+            fillStatusIndicator.classList.remove('status-off');
+            fillStatusIndicator.classList.add('status-on');
+            fillStatusText.textContent = 'Always Enabled';
+            
+            emptyStatusIndicator.classList.remove('status-off');
+            emptyStatusIndicator.classList.add('status-on');
+            emptyStatusText.textContent = 'Always Enabled';
+        }
+
+        // Update net flow display
+        function updateNetFlowDisplay() {
+            const netFlow = state.fillRate - state.emptyRate;
+            const absNetFlow = Math.abs(netFlow).toFixed(2);
+            
+            if (netFlow > 0) {
+                netFlowValue.textContent = `+${absNetFlow} %/s`;
+                netFlowValue.className = 'net-flow-value filling';
+                netFlowStatus.textContent = 'Tank is filling';
+            } else if (netFlow < 0) {
+                netFlowValue.textContent = `-${absNetFlow} %/s`;
+                netFlowValue.className = 'net-flow-value emptying';
+                netFlowStatus.textContent = 'Tank is emptying';
+            } else {
+                netFlowValue.textContent = `0.00 %/s`;
+                netFlowValue.className = 'net-flow-value balanced';
+                netFlowStatus.textContent = 'Tank level is stable';
+            }
+        }
+
         // Update noise level display
         function updateNoiseDisplay() {
             const levels = ['Low', 'Medium', 'High'];
@@ -950,41 +1192,40 @@
                 powerBtn.classList.add('off');
                 statusIndicator.classList.remove('status-off');
                 statusIndicator.classList.add('status-on');
-                statusText.textContent = 'Motor is ON - Filling tank';
+                statusText.textContent = 'Motor is ON';
                 flowStatusIndicator.classList.remove('status-off');
                 flowStatusIndicator.classList.add('status-on');
-                flowStatusText.textContent = 'Filling tank';
+                flowStatusText.textContent = 'Both flows active';
             } else {
                 powerBtn.textContent = 'Power ON';
                 powerBtn.classList.remove('off');
                 statusIndicator.classList.remove('status-on');
                 statusIndicator.classList.add('status-off');
-                statusText.textContent = 'Motor is OFF - Emptying tank';
+                statusText.textContent = 'Motor is OFF';
                 flowStatusIndicator.classList.remove('status-off');
                 flowStatusIndicator.classList.add('status-on');
-                flowStatusText.textContent = 'Emptying tank';
+                flowStatusText.textContent = 'Both flows active';
             }
             
+            updateFlowStatus();
             createBubbles();
         }
 
         // Update water displays
         function updateWaterDisplays() {
-            // Raw tank (with noise)
+            // Both tanks use the same configuration
             const rawWaterHeight = (state.actualWaterLevel / 100) * 300;
             rawWater.style.height = `${rawWaterHeight}px`;
             rawWaterLevel.textContent = `${Math.round(state.actualWaterLevel)}%`;
             
-            // Processed tank (filtered)
-            const processedLevel = 100 - (state.filteredDistance / state.tankPhysicalHeight * 100);
-            const processedWaterHeight = (processedLevel / 100) * 300;
+            const processedWaterHeight = (state.actualWaterLevel / 100) * 300;
             processedWater.style.height = `${processedWaterHeight}px`;
-            processedWaterLevel.textContent = `${Math.round(processedLevel)}%`;
+            processedWaterLevel.textContent = `${Math.round(state.actualWaterLevel)}%`;
         }
 
         // Simulate ultrasonic sensor reading with noise
         function simulateSensorReading() {
-            // Calculate actual distance based on water level
+            // Calculate actual distance based on water level and configuration
             const actualDistance = state.sensorHeight + 
                 ((100 - state.actualWaterLevel) / 100) * (state.tankPhysicalHeight - state.sensorHeight);
             
@@ -1013,8 +1254,10 @@
             // Get raw sensor reading
             state.rawDistance = simulateSensorReading();
             
-            // Apply Kalman filter
-            state.filteredDistance = kalmanFilter.update(state.rawDistance);
+            // Apply Enhanced Kalman filter processing
+            const result = enhancedKalman.processWaterLevel(state.rawDistance, state.tankPhysicalHeight);
+            state.filteredDistance = result.filteredDistance;
+            const processedLevel = result.level;
             
             // Update displays
             rawDistance.textContent = `${state.rawDistance.toFixed(1)} cm`;
@@ -1029,13 +1272,12 @@
             filteredDistanceValue.textContent = `${state.filteredDistance.toFixed(1)} cm`;
             
             // Update algorithm status
-            const jitter = Math.abs(state.rawDistance - state.filteredDistance);
-            if (jitter > 5) {
-                algorithmStatus.textContent = "Filtering Outliers";
+            if (result.sensorError) {
+                algorithmStatus.textContent = "Sensor Stale";
+                algorithmStatus.style.color = "#f44336";
+            } else if (!result.measurementAccepted) {
+                algorithmStatus.textContent = "Rejecting Outlier";
                 algorithmStatus.style.color = "#FF9800";
-            } else if (jitter > 2) {
-                algorithmStatus.textContent = "Moderate Filtering";
-                algorithmStatus.style.color = "#4CAF50";
             } else {
                 algorithmStatus.textContent = "Stable";
                 algorithmStatus.style.color = "#4CAF50";
@@ -1104,34 +1346,29 @@
         // Main simulation loop
         setInterval(() => {
             // Auto mode logic - refill when below minimum level
-            if (state.autoMode && !state.powerOn && state.actualWaterLevel <= state.minWaterLevel) {
-                state.powerOn = true;
-                powerBtn.textContent = 'Power OFF';
-                powerBtn.classList.add('off');
-                statusIndicator.classList.remove('status-off');
-                statusIndicator.classList.add('status-on');
-                statusText.textContent = 'Motor is ON - Auto Refill';
-                flowStatusIndicator.classList.remove('status-off');
-                flowStatusIndicator.classList.add('status-on');
-                flowStatusText.textContent = 'Auto Refill';
+            if (state.autoMode && state.actualWaterLevel <= state.minWaterLevel) {
+                // When below minimum level, ensure we're filling
+                if (state.fillRate <= state.emptyRate) {
+                    // Auto-adjust fill rate to be higher than empty rate
+                    state.fillRate = state.emptyRate + 0.5;
+                    fillRateSlider.value = state.fillRate;
+                    fillRateValue.textContent = `${state.fillRate.toFixed(2)} %/s`;
+                    updateNetFlowDisplay();
+                }
             }
             
-            // Simultaneous flow control - both fill and empty rates affect the water level
-            let netFlowRate = 0;
-            
-            if (state.powerOn) {
-                // When power is ON, filling dominates but emptying still happens at reduced rate
-                netFlowRate = state.fillRate - (state.emptyRate * 0.3); // Emptying is 30% effective when power is on
-                flowStatusText.textContent = state.autoMode && state.actualWaterLevel <= state.minWaterLevel ? 
-                    'Auto Refill' : 'Filling (with slow emptying)';
-            } else {
-                // When power is OFF, emptying dominates but filling still happens at reduced rate
-                netFlowRate = (state.fillRate * 0.2) - state.emptyRate; // Filling is 20% effective when power is off
-                flowStatusText.textContent = 'Emptying (with slow filling)';
-            }
-            
-            // Apply the net flow rate
+            // Apply both fill and empty rates simultaneously (net flow)
+            const netFlowRate = state.fillRate - state.emptyRate;
             state.actualWaterLevel += netFlowRate / 10;
+            
+            // Update flow status based on net flow
+            if (netFlowRate > 0) {
+                flowStatusText.textContent = 'Net Filling';
+            } else if (netFlowRate < 0) {
+                flowStatusText.textContent = 'Net Emptying';
+            } else {
+                flowStatusText.textContent = 'Balanced';
+            }
             
             // Clamp water level between 0 and 100
             if (state.actualWaterLevel > 100) state.actualWaterLevel = 100;
